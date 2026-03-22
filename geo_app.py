@@ -18,12 +18,18 @@ with st.sidebar:
     st.header("2. Match Settings")
     min_corr = st.slider("Target Correlation Threshold", 0.70, 0.99, 0.85, 0.01)
     
-    # NEW: GA4 Time Lag Input
     st.header("3. Adstock & Timing")
     ga4_time_lag = st.number_input(
-        "GA4 Time Lag (Days to Purchase)", 
+        "GA4 Time Lag (Days)", 
         min_value=1, max_value=90, value=7, step=1,
         help="How many days does it typically take a user to convert after an ad click? Found in GA4."
+    )
+    
+    st.header("4. Budget Economics")
+    expected_roas = st.number_input(
+        "Expected Marginal ROAS", 
+        min_value=0.1, max_value=20.0, value=2.0, step=0.1,
+        help="What return do you realistically expect from this ad channel? Used to calculate minimum budget."
     )
     
     st.markdown("### Verify Column Names")
@@ -45,18 +51,15 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
     df_sales = df_sales_raw.copy()
     df_map = df_map_raw.copy()
     
-    # Pre-Processing
     df_sales[date_col] = pd.to_datetime(df_sales[date_col])
     df_sales[sales_col] = pd.to_numeric(df_sales[sales_col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
     df_sales = df_sales[df_sales[sales_col] > 0] 
     
-    # INDESTRUCTIBLE ZIP CODE FIX (Extracts 4 or 5 digits, fixes Excel's dropped zeros)
     df_sales['Clean_Zip'] = df_sales[zip_col].astype(str).str.extract(r'(\d{4,5})')[0].str.zfill(5)
     df_map['Clean_Zip'] = df_map[dict_zip_col].astype(str).str.zfill(5)
     
     df = pd.merge(df_sales, df_map, on='Clean_Zip', how='inner')
     
-    # Step 1: Data Trimming
     dma_totals = df.groupby(dma_col)[sales_col].sum().sort_values(ascending=False)
     
     if len(dma_totals) > 110: 
@@ -70,7 +73,6 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
         
     df_filtered = df[df[dma_col].isin(valid_dmas)]
     
-    # Create Base Daily Pivot
     daily_pivot = df_filtered.pivot_table(index=date_col, columns=dma_col, values=sales_col, aggfunc='sum').fillna(0)
     
     def find_pairs(df_pivot, min_corr):
@@ -89,7 +91,7 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
         for _, row in corr_pairs.iterrows():
             d1, d2, corr = row['DMA_1'], row['DMA_2'], row['Correlation']
             if d1 not in paired and d2 not in paired:
-                roles = random.sample([d1, d2], 2) # Random coin flip!
+                roles = random.sample([d1, d2], 2)
                 pairs.append({
                     'Treatment_DMA': roles[0],
                     'Control_DMA': roles[1],
@@ -98,11 +100,9 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
                 paired.update([d1, d2])
         return pairs, paired
 
-    # WATERFALL PASS 1: Daily Matches
     daily_pairs, daily_paired_dmas = find_pairs(daily_pivot, min_corr)
     for p in daily_pairs: p['Matched_On'] = 'Daily'
     
-    # WATERFALL PASS 2: Weekly Fallback
     leftover_dmas_1 = [d for d in valid_dmas if d not in daily_paired_dmas]
     weekly_pairs = []
     weekly_paired_dmas = set()
@@ -112,16 +112,14 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
         weekly_pairs, weekly_paired_dmas = find_pairs(weekly_pivot, min_corr)
         for p in weekly_pairs: p['Matched_On'] = 'Weekly'
 
-    # WATERFALL PASS 3: Monthly Fallback
     leftover_dmas_2 = [d for d in leftover_dmas_1 if d not in weekly_paired_dmas]
     monthly_pairs = []
     
     if len(leftover_dmas_2) > 1:
-        monthly_pivot = daily_pivot[leftover_dmas_2].resample('MS').sum() # 'MS' = Month Start grouping
+        monthly_pivot = daily_pivot[leftover_dmas_2].resample('MS').sum() 
         monthly_pairs, _ = find_pairs(monthly_pivot, min_corr)
         for p in monthly_pairs: p['Matched_On'] = 'Monthly'
 
-    # Combine all results
     all_pairs = daily_pairs + weekly_pairs + monthly_pairs
     results_df = pd.DataFrame(all_pairs)
     
@@ -135,22 +133,17 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
 # --- MAIN LOGIC ---
 if sales_file and zip_dma_file:
     with st.spinner("Processing data through Daily/Weekly/Monthly waterfall..."):
-        # Load Data
         df_sales_raw, df_map_raw = load_data(sales_file, zip_dma_file)
-        
-        # Run Cached Processing
         results_df, daily_pivot, trim_msg, trim_success = process_data(
             df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, min_corr
         )
         
-    # Step 1: Data Trimming
     st.header("Step 1: Outlier Trimming")
     if trim_success:
         st.success(trim_msg)
     else:
         st.warning(trim_msg)
         
-    # Step 2: Correlation Results
     st.header("Step 2: Correlation & Pairing Results")
     if not results_df.empty:
         daily_count = len(results_df[results_df['Matched_On'] == 'Daily'])
@@ -165,7 +158,6 @@ if sales_file and zip_dma_file:
         
         st.dataframe(results_df, use_container_width=True)
         
-        # Step 3: Visual Validation
         st.header("Step 3: Visual Validation")
         st.markdown("Select a pair below to visually verify their historical trends move together.")
         
@@ -177,7 +169,6 @@ if sales_file and zip_dma_file:
         c_dma = results_df.iloc[selected_idx]['Control_DMA']
         matched_on = results_df.iloc[selected_idx]['Matched_On']
         
-        # Dynamic charting based on how they matched
         chart_data = daily_pivot[[t_dma, c_dma]]
         if matched_on == 'Weekly':
             chart_data = chart_data.resample('W-MON').sum()
@@ -191,27 +182,57 @@ if sales_file and zip_dma_file:
                       labels={'value': 'Gross Sales', 'variable': 'Assignment'})
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- NEW SECTION: TEST LENGTH & COOLDOWN ---
-        st.header("Step 4: Flighting & Measurement Recommendations")
+        # --- NEW SECTION: TEST LENGTH, MDE & BUDGET ---
+        st.header("Step 4: Power Analysis & Budget Recommendations")
         
-        # Industry rule of thumb: Test should run for at least 4 weeks (28 days) to capture seasonality, 
-        # OR 2x the time lag (rounded up to full weeks).
-        # Cooldown should be exactly the time lag to capture delayed conversions.
+        # 1. Timeline Calculations
         calc_test_days = max(28, int(np.ceil((ga4_time_lag * 2) / 7.0) * 7)) 
         calc_cooldown = int(ga4_time_lag)
         
-        st.info(f"💡 Based on your GA4 Time Lag of **{ga4_time_lag} days**, here is your mathematically optimal Geo-Test Timeline:")
+        # 2. Minimum Detectable Effect (MDE) & Budget Math
+        t_dmas = results_df['Treatment_DMA'].tolist()
+        c_dmas = results_df['Control_DMA'].tolist()
         
-        t_col1, t_col2, t_col3 = st.columns(3)
-        t_col1.metric("Phase 1: Active Ads", f"{calc_test_days} Days ({calc_test_days//7} Weeks)")
-        t_col2.metric("Phase 2: Cooldown", f"{calc_cooldown} Days")
-        t_col3.metric("Total Measurement Window", f"{calc_test_days + calc_cooldown} Days")
+        # Aggregate all daily sales for Treatment and Control footprint
+        t_daily_sum = daily_pivot[t_dmas].sum(axis=1)
+        c_daily_sum = daily_pivot[c_dmas].sum(axis=1)
         
-        st.markdown(f"""
-        * **Phase 1 (Active Ads):** Run your campaigns in the Treatment DMAs for **{calc_test_days} days**. This captures full day-of-week seasonality and guarantees users experience complete buying cycles while ads are on.
-        * **Phase 2 (Cooldown):** Turn campaigns **OFF**, but continue to measure both Treatment and Control sales for an additional **{calc_cooldown} days**. This captures the decaying *adstock effect* (delayed purchases from people who interacted with an ad on the final days of Phase 1).
-        """)
+        # Scale control to match treatment baseline volume (isolates pure variance from volume differences)
+        volume_scalar = t_daily_sum.sum() / c_daily_sum.sum() if c_daily_sum.sum() > 0 else 1
+        c_daily_scaled = c_daily_sum * volume_scalar
         
+        # Standard deviation of the daily differences (The "Noise")
+        daily_diffs = t_daily_sum - c_daily_scaled
+        sd_diff = np.std(daily_diffs)
+        
+        # 2.8 multiplier approximates 80% statistical power and 95% confidence (two-tailed test)
+        se_total = sd_diff * np.sqrt(calc_test_days)
+        mde_absolute = 2.8 * se_total
+        
+        # Baseline math to determine % Lift needed
+        baseline_t_volume = t_daily_sum.mean() * calc_test_days
+        mde_pct = (mde_absolute / baseline_t_volume) * 100 if baseline_t_volume > 0 else 0
+        
+        # Finally, the Budget Calculation
+        recommended_budget = mde_absolute / expected_roas if expected_roas > 0 else 0
+        
+        st.info("💡 **How this is calculated:** We measured the historical variance (noise) between your matched Treatment and Control markets. To prove the ads worked with 80% statistical confidence, you must generate enough incremental sales to clearly pierce through that noise. We then divide that required sales number by your Expected ROAS to find the minimum budget.")
+        
+        b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+        b_col1.metric("Active Test Length", f"{calc_test_days} Days")
+        b_col2.metric("Cooldown Length", f"{calc_cooldown} Days")
+        b_col3.metric("Incremental Sales Needed", f"${mde_absolute:,.0f}")
+        b_col4.metric("Minimum Required Budget", f"${recommended_budget:,.0f}")
+        
+        # The Reality Check Warning System
+        st.markdown("### Diminishing Returns Reality Check")
+        if mde_pct <= 10:
+            st.success(f"✅ **Highly Feasible (Requires {mde_pct:.1f}% Lift):** Your test requires a relatively small lift over the baseline volume of your Treatment markets. Your budget should achieve this before hitting ad saturation.")
+        elif mde_pct <= 20:
+            st.warning(f"⚠️ **Moderate Risk (Requires {mde_pct:.1f}% Lift):** You need a sizable lift to pierce the noise. You may start experiencing diminishing returns. Ensure your creative is strong and frequency caps are managed tightly.")
+        else:
+            st.error(f"🚨 **High Risk of Diminishing Returns (Requires {mde_pct:.1f}% Lift):** The historical noise is too high compared to the market size. Trying to force a {mde_pct:.1f}% lift will likely cause ad saturation and a collapsed ROAS before you reach statistical significance. **Recommendation:** Lower your correlation threshold to include more matched pairs, which increases your baseline volume and stabilizes the noise!")
+            
         # Step 5: Export
         st.header("Step 5: Export Test Design")
         csv = results_df.to_csv(index=False).encode('utf-8')
