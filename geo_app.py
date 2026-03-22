@@ -245,9 +245,9 @@ if app_mode == "1. Pre-Test Planner":
                 num_pairs = st.number_input(f"Pairs for {cell_name} (Max {max_available})", min_value=1, max_value=max_available, value=optimal_k, key=f"num_{i}")
                 
                 if num_pairs == optimal_k:
-                    st.success(f"✨ **AI Optimized Default:** Automatically selected **{optimal_k} pairs** to achieve the mathematically lowest-risk scenario (**{lowest_mde_pct:.1f}% Required Lift**), while reserving enough pairs for your other test cells!")
+                    st.success(f"✨ **Optimized Default:** Automatically selected **{optimal_k} pairs** to achieve the mathematically lowest-risk scenario (**{lowest_mde_pct:.1f}% Required Lift**), while reserving enough pairs for your other test cells!")
                 else:
-                    st.info(f"🔧 **Manual Override Active:** You manually tweaked the pairs away from the AI recommendation ({optimal_k} pairs). Watch the Diminishing Returns check below!")
+                    st.info(f"🔧 **Manual Override Active:** You manually tweaked the pairs away from the recommendation ({optimal_k} pairs). Watch the Diminishing Returns check below!")
 
                 # Lock them in for SUTVA
                 cell_df = available_df.head(num_pairs)
