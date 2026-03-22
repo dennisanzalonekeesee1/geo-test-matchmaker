@@ -46,6 +46,7 @@ if app_mode == "1. Pre-Test Planner":
         df_sales = df_sales_raw.copy()
         df_map = df_map_raw.copy()
         
+        # Indestructible pre-processing
         df_sales[date_col] = pd.to_datetime(df_sales[date_col])
         df_sales[sales_col] = pd.to_numeric(df_sales[sales_col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
         df_sales = df_sales[df_sales[sales_col] > 0] 
@@ -54,15 +55,16 @@ if app_mode == "1. Pre-Test Planner":
         df_map['Clean_Zip'] = df_map[dict_zip_col].astype(str).str.zfill(5)
         df = pd.merge(df_sales, df_map, on='Clean_Zip', how='inner')
         
+        # RESTORED: Trimming Outliers
         dma_totals = df.groupby(dma_col)[sales_col].sum().sort_values(ascending=False)
         
         if len(dma_totals) > 110: 
             valid_dmas = dma_totals.iloc[10:-100].index.tolist()
-            trim_msg = f"Started with {len(dma_totals)} DMAs. Removed Top 10 and Bottom 100. **{len(valid_dmas)} DMAs** remain."
+            trim_msg = f"Started with {len(dma_totals)} DMAs. Removed Top 10 and Bottom 100. **{len(valid_dmas)} DMAs** remain for pairing."
             trim_success = True
         else:
             valid_dmas = dma_totals.index.tolist()
-            trim_msg = f"Only found {len(dma_totals)} DMAs. Not enough to safely trim."
+            trim_msg = f"Only found {len(dma_totals)} DMAs. Not enough to safely trim without losing data."
             trim_success = False
             
         df_filtered = df[df[dma_col].isin(valid_dmas)]
@@ -87,6 +89,7 @@ if app_mode == "1. Pre-Test Planner":
                     paired.update([d1, d2])
             return pairs, paired
 
+        # Waterfall Passes
         daily_pairs, daily_paired_dmas = find_pairs(daily_pivot, min_corr)
         for p in daily_pairs: p['Matched_On'] = 'Daily'
         
@@ -121,7 +124,13 @@ if app_mode == "1. Pre-Test Planner":
                 df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, min_corr
             )
             
-        st.header("Step 1: The Matchmaker Waterfall")
+        # RESTORED: Step 1 Trimming UI Output
+        st.header("Step 1: Outlier Trimming & Pairing Results")
+        if trim_success:
+            st.success(trim_msg)
+        else:
+            st.warning(trim_msg)
+
         if not results_df.empty:
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Pairs Available", len(results_df))
@@ -129,48 +138,123 @@ if app_mode == "1. Pre-Test Planner":
             col3.metric("Weekly Pairs", len(results_df[results_df['Matched_On'] == 'Weekly']))
             col4.metric("Monthly Pairs", len(results_df[results_df['Matched_On'] == 'Monthly']))
             
-            with st.expander("View All Generated Pairs (The Dating Pool)"):
+            # RESTORED: Individual Pair Visualizer Inside Expander
+            with st.expander("🔍 View All Generated Pairs & Individual Visualizer (The Dating Pool)"):
                 st.dataframe(results_df, use_container_width=True)
+                
+                st.markdown("#### Inspect an Individual Pair")
+                pair_options = results_df.apply(lambda x: f"Pair {x['Pair_ID']}: {x['Treatment_DMA']} vs {x['Control_DMA']} ({x['Matched_On']}, r={x['Correlation']})", axis=1).tolist()
+                
+                if pair_options:
+                    selected_pair_str = st.selectbox("Select a pair to verify their historical trends move together:", pair_options)
+                    
+                    selected_idx = pair_options.index(selected_pair_str)
+                    t_dma = results_df.iloc[selected_idx]['Treatment_DMA']
+                    c_dma = results_df.iloc[selected_idx]['Control_DMA']
+                    matched_on = results_df.iloc[selected_idx]['Matched_On']
+                    
+                    chart_data_ind = daily_pivot[[t_dma, c_dma]]
+                    if matched_on == 'Weekly': chart_data_ind = chart_data_ind.resample('W-MON').sum()
+                    elif matched_on == 'Monthly': chart_data_ind = chart_data_ind.resample('MS').sum()
+                        
+                    fig_ind = px.line(chart_data_ind.reset_index(), x=date_col, y=[t_dma, c_dma], title=f"Historical Match ({matched_on})", labels={'value': 'Gross Sales', 'variable': 'Assignment'})
+                    st.plotly_chart(fig_ind, use_container_width=True)
+
+            st.header("Step 2: Multi-Cell Test Builder & Risk Optimizer")
+            st.markdown("Build concurrent tests safely. **The AI auto-allocates pairs to minimize statistical noise and guarantee the lowest-risk scenario for the number of cells you select.**")
             
-            st.header("Step 2: Multi-Cell Test Builder")
-            num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
+            num_cells = st.number_input("How many separate test cells are you running concurrently?", min_value=1, max_value=5, value=1)
             
             assigned_pair_ids = [] 
             halflife_map = {
-                "High-Intent DR (Search, Shopping)": 3, 
-                "Feed-Based Social (Meta, TikTok)": 7, 
+                "High-Intent DR (Search, Shopping, Retargeting)": 3, 
+                "Feed-Based Social (Meta Image/Video, TikTok, Reels)": 7, 
                 "Immersive / Lean-Back (CTV, YouTube, TV, Audio)": 14
             }
-            lag_map = {"Low (<$50, Impulse)": 1, "Medium ($50-$200)": 7, "High ($200+, Heavy research)": 14}
+            lag_map = {"Low (<$50, Impulse)": 1, "Medium ($50-$200, Mild consideration)": 7, "High ($200+, Heavy research)": 14}
             
             for i in range(num_cells):
                 st.markdown(f"### 🧪 Test Cell {i+1}")
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3 = st.columns(3)
                 cell_name = c1.text_input(f"Campaign/Cell Name", f"Campaign {i+1}", key=f"name_{i}")
                 cadence = c2.selectbox(f"Match Cadence", ["Daily", "Weekly", "Monthly"], key=f"cadence_{i}")
+                target_roas = c3.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
+                
+                c4, c5 = st.columns(2)
+                channel = c4.selectbox("Media Format & Attention Level", list(halflife_map.keys()), key=f"chan_{i}")
+                consideration = c5.selectbox("Product Price / Consideration", list(lag_map.keys()), key=f"cons_{i}")
                 
                 available_df = results_df[(results_df['Matched_On'] == cadence) & (~results_df['Pair_ID'].isin(assigned_pair_ids))]
                 max_available = len(available_df)
                 
                 if max_available == 0:
-                    st.error(f"0 {cadence} pairs left! None available for this cell.")
+                    st.error(f"0 {cadence} pairs left! None available for this cell. You must free up pairs from earlier cells.")
                     continue
-                    
-                num_pairs = c3.number_input(f"Pairs to Auto-Select (Max {max_available})", 1, max_available, min(5, max_available), key=f"num_{i}")
-                target_roas = c4.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
                 
+                # --- NEW: AI OPTIMIZATION ENGINE ---
+                # Calculate MDE for every possible pair count to mathematically find the lowest risk
+                hl_days = halflife_map[channel]
+                lag_days = lag_map[consideration]
+                calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
+                
+                if cadence == 'Weekly': periods = calc_test_days / 7.0
+                elif cadence == 'Monthly': periods = calc_test_days / 30.0
+                else: periods = calc_test_days
+                
+                lowest_mde_pct = float('inf')
+                optimal_k = 1
+                
+                # Ensure we leave at least 1 pair for any remaining cells
+                remaining_cells = num_cells - i
+                max_k_to_check = max_available - (remaining_cells - 1) if remaining_cells > 1 else max_available
+                max_k_to_check = max(1, max_k_to_check)
+
+                for k in range(1, max_k_to_check + 1):
+                    temp_df = available_df.head(k)
+                    t_dmas_tmp = temp_df['Treatment_DMA'].tolist()
+                    c_dmas_tmp = temp_df['Control_DMA'].tolist()
+                    
+                    t_sum_tmp = daily_pivot[t_dmas_tmp].sum(axis=1)
+                    c_sum_tmp = daily_pivot[c_dmas_tmp].sum(axis=1)
+                    
+                    if cadence == 'Weekly':
+                        t_sum_tmp = t_sum_tmp.resample('W-MON').sum()
+                        c_sum_tmp = c_sum_tmp.resample('W-MON').sum()
+                    elif cadence == 'Monthly':
+                        t_sum_tmp = t_sum_tmp.resample('MS').sum()
+                        c_sum_tmp = c_sum_tmp.resample('MS').sum()
+                        
+                    vol_scalar_tmp = t_sum_tmp.sum() / c_sum_tmp.sum() if c_sum_tmp.sum() > 0 else 1
+                    c_scaled_tmp = c_sum_tmp * vol_scalar_tmp
+                    
+                    diffs_tmp = t_sum_tmp - c_scaled_tmp
+                    sd_diff_tmp = np.std(diffs_tmp)
+                    
+                    se_total_tmp = sd_diff_tmp * np.sqrt(periods) 
+                    mde_abs_tmp = 2.8 * se_total_tmp
+                    baseline_t_vol_tmp = t_sum_tmp.mean() * periods
+                    
+                    mde_pct_tmp = (mde_abs_tmp / baseline_t_vol_tmp) * 100 if baseline_t_vol_tmp > 0 else float('inf')
+                    
+                    if mde_pct_tmp < lowest_mde_pct:
+                        lowest_mde_pct = mde_pct_tmp
+                        optimal_k = k
+                        
+                # --- PAIR SELECTION UI ---
+                st.markdown("#### 🎯 Auto-Allocator")
+                num_pairs = st.number_input(f"Pairs for {cell_name} (Max {max_available})", min_value=1, max_value=max_available, value=optimal_k, key=f"num_{i}")
+                
+                if num_pairs == optimal_k:
+                    st.success(f"✨ **AI Optimized Default:** Automatically selected **{optimal_k} pairs** to achieve the mathematically lowest-risk scenario (**{lowest_mde_pct:.1f}% Required Lift**), while reserving enough pairs for your other test cells!")
+                else:
+                    st.info(f"🔧 **Manual Override Active:** You manually tweaked the pairs away from the AI recommendation ({optimal_k} pairs). Watch the Diminishing Returns check below!")
+
+                # Lock them in for SUTVA
                 cell_df = available_df.head(num_pairs)
                 assigned_pair_ids.extend(cell_df['Pair_ID'].tolist())
                 
-                ac1, ac2 = st.columns(2)
-                channel = ac1.selectbox("Media Format & Attention Level", list(halflife_map.keys()), key=f"chan_{i}")
-                consideration = ac2.selectbox("Product Price / Consideration", list(lag_map.keys()), key=f"cons_{i}")
-                
-                hl_days = halflife_map[channel]
-                lag_days = lag_map[consideration]
-                
+                # --- FINAL CALCULATIONS FOR SELECTED PAIRS ---
                 calc_cooldown = lag_days + (hl_days * 2)
-                calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
                 
                 t_dmas = cell_df['Treatment_DMA'].tolist()
                 c_dmas = cell_df['Control_DMA'].tolist()
@@ -181,13 +265,9 @@ if app_mode == "1. Pre-Test Planner":
                 if cadence == 'Weekly':
                     t_sum = t_sum.resample('W-MON').sum()
                     c_sum = c_sum.resample('W-MON').sum()
-                    periods = calc_test_days / 7.0
                 elif cadence == 'Monthly':
                     t_sum = t_sum.resample('MS').sum()
                     c_sum = c_sum.resample('MS').sum()
-                    periods = calc_test_days / 30.0
-                else:
-                    periods = calc_test_days
                     
                 volume_scalar = t_sum.sum() / c_sum.sum() if c_sum.sum() > 0 else 1
                 c_scaled = c_sum * volume_scalar
@@ -202,12 +282,21 @@ if app_mode == "1. Pre-Test Planner":
                 mde_pct = (mde_absolute / baseline_t_vol) * 100 if baseline_t_vol > 0 else 0
                 recommended_budget = mde_absolute / target_roas if target_roas > 0 else 0
                 
-                with st.expander(f"📊 View Economics & Export for: {cell_name}", expanded=True):
+                with st.expander(f"📊 View Economics & Export for: {cell_name} ({num_pairs} Pairs)", expanded=True):
                     bc1, bc2, bc3, bc4 = st.columns(4)
                     bc1.metric("Active Run Time", f"{calc_test_days} Days")
                     bc2.metric("Adstock Cooldown", f"{calc_cooldown} Days")
                     bc3.metric("Incremental Sales Needed", f"${mde_absolute:,.0f} ({mde_pct:.1f}% Lift)")
                     bc4.metric("Required Total Budget", f"${recommended_budget:,.0f}")
+                    
+                    # --- RESTORED DIMINISHING RETURNS WARNINGS ---
+                    st.markdown("### Diminishing Returns Reality Check")
+                    if mde_pct <= 10:
+                        st.success(f"✅ **Highly Feasible (Requires {mde_pct:.1f}% Lift):** Safe to execute for these {num_pairs} pairs. Low risk of ad saturation.")
+                    elif mde_pct <= 20:
+                        st.warning(f"⚠️ **Moderate Risk (Requires {mde_pct:.1f}% Lift):** You need a sizable lift. Ensure strong creative and manage frequency caps.")
+                    else:
+                        st.error(f"🚨 **High Risk of Saturation (Requires {mde_pct:.1f}% Lift):** The historical noise is too high compared to the volume of the markets you selected. Trying to force this lift will likely cause ad fatigue before you hit statistical significance.")
                     
                     chart_data = pd.DataFrame({'Treatment': t_sum, 'Control (Scaled)': c_scaled}).reset_index()
                     fig = px.line(chart_data, x=date_col, y=['Treatment', 'Control (Scaled)'], title=f"Historical Baseline: {cell_name}", labels={'value':'Gross Sales', 'variable':'Group'})
@@ -263,7 +352,7 @@ elif app_mode == "2. Post-Test Measurement":
             
             t_dmas = test_map['Treatment_DMA'].tolist()
             c_dmas = test_map['Control_DMA'].tolist()
-            cadence = test_map['Matched_On'].iloc[0] # Auto-detect how these pairs were matched!
+            cadence = test_map['Matched_On'].iloc[0] 
             
             df_test = df[df[dma_col2].isin(t_dmas + c_dmas)]
             daily_pivot = df_test.pivot_table(index=date_col2, columns=dma_col2, values=sales_col2, aggfunc='sum').fillna(0)
