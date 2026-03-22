@@ -6,8 +6,8 @@ import plotly.express as px
 
 st.set_page_config(page_title="Geo-Test Matchmaker Pro", layout="wide")
 
-st.title("📍 Geo-Test Matchmaker & Pre-Test Planner")
-st.markdown("Automate DMA matching, test cell selection, adstock cooldowns, and budget power analysis.")
+st.title("📍 Geo-Test Matchmaker & Multi-Cell Planner")
+st.markdown("Automate DMA matching, auto-allocate pairs to isolated test cells, and calculate channel-specific budgets.")
 
 # --- SIDEBAR: SETTINGS ---
 with st.sidebar:
@@ -17,25 +17,6 @@ with st.sidebar:
     
     st.header("2. Match Settings")
     min_corr = st.slider("Target Correlation Threshold", 0.70, 0.99, 0.85, 0.01)
-    
-    st.header("3. Adstock & Cooldown")
-    ad_channel = st.selectbox("Media Channel (Decay Rate)", [
-        "Search / Bottom Funnel (Fast Decay)",
-        "Social / Mid Funnel (Medium Decay)",
-        "Video / CTV / Audio (Slow Decay)"
-    ])
-    consideration = st.selectbox("Product Consideration (Purchase Lag)", [
-        "Low (Impulse, <$50)",
-        "Medium ($50 - $200)",
-        "High (Research, $200+)"
-    ])
-    
-    st.header("4. Business Economics")
-    expected_roas = st.number_input(
-        "Target (Break-Even) ROAS", 
-        min_value=0.1, max_value=20.0, value=2.0, step=0.1,
-        help="Minimum ROAS needed for success. We power the budget to detect this."
-    )
     
     st.markdown("### Verify Column Names")
     date_col = st.text_input("Date Column (Sales)", "Day")
@@ -97,9 +78,11 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
                 paired.update([d1, d2])
         return pairs, paired
 
+    # WATERFALL PASS 1
     daily_pairs, daily_paired_dmas = find_pairs(daily_pivot, min_corr)
     for p in daily_pairs: p['Matched_On'] = 'Daily'
     
+    # WATERFALL PASS 2
     leftover_dmas_1 = [d for d in valid_dmas if d not in daily_paired_dmas]
     weekly_pairs = []
     weekly_paired_dmas = set()
@@ -108,6 +91,7 @@ def process_data(df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col
         weekly_pairs, weekly_paired_dmas = find_pairs(weekly_pivot, min_corr)
         for p in weekly_pairs: p['Matched_On'] = 'Weekly'
 
+    # WATERFALL PASS 3
     leftover_dmas_2 = [d for d in leftover_dmas_1 if d not in weekly_paired_dmas]
     monthly_pairs = []
     if len(leftover_dmas_2) > 1:
@@ -133,113 +117,124 @@ if sales_file and zip_dma_file:
             df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, min_corr
         )
         
-    st.header("Step 1: Correlation & Pairing Results")
+    st.header("Step 1: The Matchmaker Waterfall")
     if not results_df.empty:
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Pairs", len(results_df))
-        col2.metric("Matched Daily", len(results_df[results_df['Matched_On'] == 'Daily']))
-        col3.metric("Matched Weekly", len(results_df[results_df['Matched_On'] == 'Weekly']))
-        col4.metric("Matched Monthly", len(results_df[results_df['Matched_On'] == 'Monthly']))
+        col1.metric("Total Pairs Available", len(results_df))
+        col2.metric("Daily Pairs", len(results_df[results_df['Matched_On'] == 'Daily']))
+        col3.metric("Weekly Pairs", len(results_df[results_df['Matched_On'] == 'Weekly']))
+        col4.metric("Monthly Pairs", len(results_df[results_df['Matched_On'] == 'Monthly']))
         
-        st.dataframe(results_df, use_container_width=True)
+        with st.expander("View All Generated Pairs (The Dating Pool)"):
+            st.dataframe(results_df, use_container_width=True)
         
-        # --- NEW MULTI-CELL BUILDER ---
-        st.header("Step 2: Build Your Test Cell (Multi-Cell Builder)")
-        st.markdown("Select a specific block of pairs for this test cell to isolate the budget calculations. *Tip: You can use Pairs 1-5 for one test, and Pairs 6-10 for a concurrent, separate test without breaking SUTVA.*")
+        # --- MULTI-CELL AUTO-ALLOCATOR ---
+        st.header("Step 2: Multi-Cell Test Builder")
+        st.markdown("Build concurrent tests safely. Pairs assigned to Cell 1 are mathematically locked out of Cell 2 to prevent SUTVA violations. Cells are strictly filtered by matching cadence to prevent variance explosions.")
         
-        # Multi-select UI
-        pair_strings = results_df.apply(lambda x: f"Pair {x['Pair_ID']} ({x['Matched_On']}, r={x['Correlation']}): {x['Treatment_DMA']} vs {x['Control_DMA']}", axis=1).tolist()
+        num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
         
-        # By default, pre-select ONLY Daily pairs to protect the math!
-        default_pairs = results_df[results_df['Matched_On'] == 'Daily'].apply(
-            lambda x: f"Pair {x['Pair_ID']} ({x['Matched_On']}, r={x['Correlation']}): {x['Treatment_DMA']} vs {x['Control_DMA']}", axis=1
-        ).tolist()
+        assigned_pair_ids = [] # Tracks SUTVA lockouts!
         
-        selected_pair_strings = st.multiselect("Select Pairs to include in this Test Cell:", options=pair_strings, default=default_pairs)
+        # Industry heuristics mappings
+        halflife_map = {"Search / Bottom Funnel": 3, "Social / Mid Funnel": 7, "Video / CTV / Audio": 14}
+        lag_map = {"Low (<$50)": 1, "Medium ($50-$200)": 7, "High ($200+)": 14}
         
-        if selected_pair_strings:
-            selected_ids = [int(p.split(" ")[1]) for p in selected_pair_strings]
-            test_df = results_df[results_df['Pair_ID'].isin(selected_ids)]
+        for i in range(num_cells):
+            st.markdown(f"### 🧪 Test Cell {i+1}")
             
-            # Warning about mixing cadences
-            cadences = test_df['Matched_On'].unique()
-            if len(cadences) > 1:
-                st.warning("⚠️ **Methodology Warning:** You selected a mix of Daily, Weekly, or Monthly pairs. Because they have different historical variance levels, measuring them together in a daily time-series model post-test will be noisy. **Recommendation:** Only group pairs from the same matching tier.")
-
-            # --- DYNAMIC BUDGET & POWER CALCULATION ---
-            st.header("Step 3: Power Analysis & Budget Math")
+            # Row 1: Cell Definition
+            c1, c2, c3, c4 = st.columns(4)
+            cell_name = c1.text_input(f"Campaign/Cell Name", f"Campaign {i+1}", key=f"name_{i}")
+            cadence = c2.selectbox(f"Match Cadence", ["Daily", "Weekly", "Monthly"], key=f"cadence_{i}", help="Strictly isolates pairs by how they matched to protect statistical variance.")
             
-            # Adstock / Cooldown Math based on industry heuristics
-            halflife_map = {"Search / Bottom Funnel (Fast Decay)": 3, "Social / Mid Funnel (Medium Decay)": 7, "Video / CTV / Audio (Slow Decay)": 14}
-            lag_map = {"Low (Impulse, <$50)": 1, "Medium ($50 - $200)": 7, "High (Research, $200+)": 14}
+            # Filter available pairs based on Cadence AND SUTVA lockouts
+            available_df = results_df[(results_df['Matched_On'] == cadence) & (~results_df['Pair_ID'].isin(assigned_pair_ids))]
+            max_available = len(available_df)
             
-            hl_days = halflife_map[ad_channel]
+            if max_available == 0:
+                st.error(f"0 {cadence} pairs left! They are either all assigned to other cells, or none met the correlation threshold.")
+                continue
+                
+            num_pairs = c3.number_input(f"Pairs to Auto-Select (Max {max_available})", 1, max_available, min(5, max_available), key=f"num_{i}")
+            target_roas = c4.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
+            
+            # Auto-Allocate the top highest-correlated pairs available
+            cell_df = available_df.head(num_pairs)
+            assigned_pair_ids.extend(cell_df['Pair_ID'].tolist())
+            
+            # Row 2: Adstock Economics
+            ac1, ac2 = st.columns(2)
+            channel = ac1.selectbox("Media Channel", list(halflife_map.keys()), key=f"chan_{i}")
+            consideration = ac2.selectbox("Product Consideration", list(lag_map.keys()), key=f"cons_{i}")
+            
+            # --- DYNAMIC POWER ANALYSIS ---
+            hl_days = halflife_map[channel]
             lag_days = lag_map[consideration]
             
-            # Cooldown = Product Lag + (2 * Half-life to capture ~75%+ of decay)
+            # Cooldown = Product consideration lag + 2x the channel half-life (captures ~75% of memory decay)
             calc_cooldown = lag_days + (hl_days * 2)
-            
-            # Test Length rule of thumb: At least 28 days, or 2x the consideration lag
             calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
             
-            # Math only runs on the selected pairs!
-            t_dmas = test_df['Treatment_DMA'].tolist()
-            c_dmas = test_df['Control_DMA'].tolist()
+            t_dmas = cell_df['Treatment_DMA'].tolist()
+            c_dmas = cell_df['Control_DMA'].tolist()
             
-            t_daily_sum = daily_pivot[t_dmas].sum(axis=1)
-            c_daily_sum = daily_pivot[c_dmas].sum(axis=1)
+            t_sum = daily_pivot[t_dmas].sum(axis=1)
+            c_sum = daily_pivot[c_dmas].sum(axis=1)
             
-            volume_scalar = t_daily_sum.sum() / c_daily_sum.sum() if c_daily_sum.sum() > 0 else 1
-            c_daily_scaled = c_daily_sum * volume_scalar
+            # Crucial Heteroskedasticity Fix: Resample time-series BEFORE calculating noise variance based on cadence!
+            if cadence == 'Weekly':
+                t_sum = t_sum.resample('W-MON').sum()
+                c_sum = c_sum.resample('W-MON').sum()
+                periods = calc_test_days / 7.0
+            elif cadence == 'Monthly':
+                t_sum = t_sum.resample('MS').sum()
+                c_sum = c_sum.resample('MS').sum()
+                periods = calc_test_days / 30.0
+            else:
+                periods = calc_test_days
+                
+            volume_scalar = t_sum.sum() / c_sum.sum() if c_sum.sum() > 0 else 1
+            c_scaled = c_sum * volume_scalar
             
-            daily_diffs = t_daily_sum - c_daily_scaled
-            sd_diff = np.std(daily_diffs)
+            diffs = t_sum - c_scaled
+            sd_diff = np.std(diffs)
             
-            se_total = sd_diff * np.sqrt(calc_test_days)
+            se_total = sd_diff * np.sqrt(periods) # Power accounts for the proper timeframe!
             mde_absolute = 2.8 * se_total
             
-            baseline_t_volume = t_daily_sum.mean() * calc_test_days
-            mde_pct = (mde_absolute / baseline_t_volume) * 100 if baseline_t_volume > 0 else 0
-            recommended_budget = mde_absolute / expected_roas if expected_roas > 0 else 0
+            baseline_t_vol = t_sum.mean() * periods
+            mde_pct = (mde_absolute / baseline_t_vol) * 100 if baseline_t_vol > 0 else 0
+            recommended_budget = mde_absolute / target_roas if target_roas > 0 else 0
             
-            st.info(f"💡 **Dynamic Math:** Based on standard heuristics for **{ad_channel}** and **{consideration}** products, we estimate a combined adstock/purchase cooldown of **{calc_cooldown} days**. The budget is calculated *only* for the {len(test_df)} pairs you selected.")
-            
-            b_col1, b_col2, b_col3, b_col4 = st.columns(4)
-            b_col1.metric("Active Test Length", f"{calc_test_days} Days")
-            b_col2.metric("Decay Cooldown", f"{calc_cooldown} Days")
-            b_col3.metric("Required Incremental Sales", f"${mde_absolute:,.0f}")
-            b_col4.metric(f"Total Budget (For these {len(test_df)} pairs)", f"${recommended_budget:,.0f}")
-            
-            st.markdown("### Diminishing Returns Reality Check")
-            if mde_pct <= 10:
-                st.success(f"✅ **Highly Feasible (Requires {mde_pct:.1f}% Lift):** Safe to execute for these {len(test_df)} markets.")
-            elif mde_pct <= 20:
-                st.warning(f"⚠️ **Moderate Risk (Requires {mde_pct:.1f}% Lift):** Watch frequency caps to avoid ad saturation.")
-            else:
-                st.error(f"🚨 **High Risk of Diminishing Returns (Requires {mde_pct:.1f}% Lift):** The historical noise is too high compared to the volume of the markets you selected. **Recommendation:** Add MORE pairs to your Test Cell Builder above to increase your baseline volume and lower the required lift percentage.")
+            # Output Results inside an expander to keep UI clean
+            with st.expander(f"📊 View Economics & Export for: {cell_name} ({num_pairs} Pairs)", expanded=True):
+                bc1, bc2, bc3, bc4 = st.columns(4)
+                bc1.metric("Active Run Time", f"{calc_test_days} Days")
+                bc2.metric("Adstock Cooldown", f"{calc_cooldown} Days")
+                bc3.metric("Incremental Sales Needed", f"${mde_absolute:,.0f} ({mde_pct:.1f}% Lift)")
+                bc4.metric("Required Total Budget", f"${recommended_budget:,.0f}")
                 
-            # --- VISUAL VALIDATION (Dynamic) ---
-            st.header("Step 4: Visual Validation")
-            st.markdown("Visualizing the combined sales volume of your selected Treatment footprint vs. your selected Control footprint. Notice how pooling them smooths out the variance!")
-            
-            chart_data = pd.DataFrame({'Treatment Cell': t_daily_sum, 'Control Cell (Scaled)': c_daily_scaled}).reset_index()
-            # If all selected are weekly/monthly, adjust plot
-            if all(m == 'Weekly' for m in cadences):
-                chart_data = chart_data.set_index(date_col).resample('W-MON').sum().reset_index()
-            elif all(m == 'Monthly' for m in cadences):
-                chart_data = chart_data.set_index(date_col).resample('MS').sum().reset_index()
+                if mde_pct <= 10:
+                    st.success("✅ **Highly Feasible:** Your required lift is small. Low risk of ad saturation.")
+                elif mde_pct <= 20:
+                    st.warning("⚠️ **Moderate Risk:** Ensure strong creative and manage frequency caps.")
+                else:
+                    st.error("🚨 **High Risk of Saturation:** This cell requires a massive lift to beat the noise. Allocate MORE pairs to this cell to lower the variance!")
                 
-            fig = px.line(chart_data, x=date_col, y=['Treatment Cell', 'Control Cell (Scaled)'], 
-                          title=f"Historical Aggregate: Selected Treatment vs Control Markets",
-                          labels={'value': 'Gross Sales', 'variable': 'Group'})
-            st.plotly_chart(fig, use_container_width=True)
+                # Dynamic Visualizer
+                chart_data = pd.DataFrame({'Treatment': t_sum, 'Control (Scaled)': c_scaled}).reset_index()
+                fig = px.line(chart_data, x=date_col, y=['Treatment', 'Control (Scaled)'], 
+                              title=f"Historical Baseline ({cadence}): {cell_name}",
+                              labels={'value': 'Gross Sales', 'variable': 'Group'})
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Cell-Specific Export!
+                csv = cell_df.to_csv(index=False).encode('utf-8')
+                st.download_button(label=f"📥 Download Activation Map: {cell_name}", data=csv, file_name=f'test_cell_{i+1}_{cell_name.replace(" ", "_")}.csv', mime='text/csv')
+                
+            st.divider()
 
-            # Export
-            st.header("Step 5: Export Test Design")
-            csv = test_df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 Download This Test Cell (CSV)", data=csv, file_name='geo_test_cell.csv', mime='text/csv')
-        else:
-            st.warning("Please select at least one pair to calculate the budget.")
     else:
         st.error(f"No pairs found. Try lowering the threshold.")
 else:
