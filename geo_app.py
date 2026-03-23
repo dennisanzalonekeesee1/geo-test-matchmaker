@@ -61,7 +61,7 @@ if app_mode == "1. Pre-Test Planner":
         
         st.header("2. Match Settings")
         # Move toggle here so it loads first, and use it to disable the slider!
-       auto_optimize = st.toggle("🤖 Auto-Optimize for Lowest Lift", value=True)
+        auto_optimize = st.toggle("🤖 Auto-Optimize for Lowest Lift", value=True)
         min_corr = st.slider("Absolute Minimum Correlation", 0.75, 0.99, 0.85, 0.01)
         
         st.markdown("### Verify Column Names")
