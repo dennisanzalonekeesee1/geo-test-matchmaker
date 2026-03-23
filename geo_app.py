@@ -28,9 +28,9 @@ def check_auth():
 if not check_auth():
     st.stop()
 
-# --- EVERYTHING BELOW THIS LINE IS YOUR PROTECTED CODE ---
+# --- EVERYTHING BELOW THIS LINE IS THE PROTECTED CODE ---
 st.success("Access Granted.")
-# Your actual work starts here...
+# Actual work starts here...
 
 st.set_page_config(page_title="Geo-Test App", layout="wide")
 
@@ -159,6 +159,55 @@ if app_mode == "1. Pre-Test Planner":
             
             with st.expander("View All Generated Pairs (The Dating Pool)"):
                 st.dataframe(results_df, use_container_width=True)
+
+            def optimize_test_setup(results_df, daily_pivot, calc_test_days, target_roas):
+    optimization_results = []
+    
+    # Test every cadence and every possible number of pairs (up to 15 or max available)
+    for cadence in ["Daily", "Weekly", "Monthly"]:
+        cadence_df = results_df[results_df['Matched_On'] == cadence]
+        max_p = min(len(cadence_df), 15)
+        
+        if max_p == 0: continue
+            
+        for n in range(1, max_p + 1):
+            # Selection
+            test_pairs = cadence_df.head(n)
+            t_dmas = test_pairs['Treatment_DMA'].tolist()
+            c_dmas = test_pairs['Control_DMA'].tolist()
+            
+            # Data Prep
+            t_sum = daily_pivot[t_dmas].sum(axis=1)
+            c_sum = daily_pivot[c_dmas].sum(axis=1)
+            
+            if cadence == 'Weekly':
+                t_sum, c_sum = t_sum.resample('W-MON').sum(), c_sum.resample('W-MON').sum()
+                periods = calc_test_days / 7.0
+            elif cadence == 'Monthly':
+                t_sum, c_sum = t_sum.resample('MS').sum(), c_sum.resample('MS').sum()
+                periods = calc_test_days / 30.0
+            else:
+                periods = calc_test_days
+
+            # Math logic (Simplified MDE)
+            scalar = t_sum.sum() / c_sum.sum() if c_sum.sum() > 0 else 1
+            diffs = t_sum - (c_sum * scalar)
+            sd_diff = np.std(diffs)
+            mde_abs = 2.8 * (sd_diff * np.sqrt(periods))
+            baseline_vol = t_sum.mean() * periods
+            mde_pct = (mde_abs / baseline_vol) * 100 if baseline_vol > 0 else 999
+            
+            optimization_results.append({
+                'Cadence': cadence,
+                'Pairs': n,
+                'Lift_Pct': mde_pct,
+                'Budget': mde_abs / target_roas
+            })
+
+    opt_df = pd.DataFrame(optimization_results)
+    if not opt_df.empty:
+        return opt_df.sort_values("Lift_Pct").iloc[0] # Return the one with lowest Lift %
+    return None
             
             st.header("Step 2: Multi-Cell Test Builder")
             num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
