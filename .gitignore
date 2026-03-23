@@ -1,0 +1,6 @@
+# Ignore the secrets folder entirely
+.streamlit/secrets.toml
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
