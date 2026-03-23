@@ -238,7 +238,7 @@ if app_mode == "1. Pre-Test Planner":
                     budget_label = "Required Total Budget" if test_direction == "Scale-Up (Ads ON)" else "Spend to Withhold"
                     bc4.metric(budget_label, f"${recommended_budget:,.0f}")
 
-                   st.markdown("### Diminishing Returns Risk")
+                    st.markdown("### Diminishing Returns Risk")
                         if mde_pct <= 10:
                             st.success(f"✅ **Highly Feasible (Requires {mde_pct:.1f}% Lift):** Safe to execute for these {len(alloc)} pairs. Low risk of ad saturation.")
                         elif mde_pct <= 20:
