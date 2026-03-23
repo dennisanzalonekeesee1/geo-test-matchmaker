@@ -210,7 +210,7 @@ def optimize_test_setup(results_df, daily_pivot, calc_test_days, target_roas):
     return None
             
     st.header("Step 2: Multi-Cell Test Builder")
-            num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
+    num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
             
             assigned_pair_ids = [] 
             halflife_map = {
