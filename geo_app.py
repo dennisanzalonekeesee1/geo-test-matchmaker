@@ -61,8 +61,8 @@ if app_mode == "1. Pre-Test Planner":
         
         st.header("2. Match Settings")
         # Move toggle here so it loads first, and use it to disable the slider!
-        auto_optimize = st.toggle("🤖 Auto-Optimize for Lowest Lift", value=True)
-        min_corr = st.slider("Target Correlation Threshold (Manual)", 0.70, 0.99, 0.85, 0.01, disabled=auto_optimize)
+       auto_optimize = st.toggle("🤖 Auto-Optimize for Lowest Lift", value=True)
+        min_corr = st.slider("Absolute Minimum Correlation", 0.75, 0.99, 0.85, 0.01)
         
         st.markdown("### Verify Column Names")
         date_col = st.text_input("Date Column (Sales)", "Day")
@@ -152,9 +152,9 @@ if app_mode == "1. Pre-Test Planner":
         with st.spinner("Processing data through waterfall..."):
             df_sales_raw, df_map_raw = load_data(sales_file, zip_dma_file)
             
-            # ALWAYS process the master pool at the absolute minimum (0.70) so the optimizer has all the data
+            # Process the master pool using your sidebar slider as the absolute floor
             master_results_df, daily_pivot, trim_msg, trim_success = process_pre_test(
-                df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, 0.70
+                df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, min_corr
             )
             
         st.header("Step 1: The Matchmaker Waterfall")
@@ -216,8 +216,8 @@ if app_mode == "1. Pre-Test Planner":
                     best_pairs = 1
                     best_corr = min_corr # Defaults to your sidebar setting
                     
-                    # 1. Search Grid: Test EVERY correlation step (0.01) from 0.70 up to 0.99
-                    test_corrs = [round(c, 2) for c in np.arange(0.70, 1.00, 0.01)]
+                    # 1. Search Grid: Test EVERY correlation step (0.01) from your sidebar floor up to 0.99
+                    test_corrs = [round(c, 2) for c in np.arange(min_corr, 1.00, 0.01)]
                     
                     for test_corr in test_corrs:
                         # Dynamically shrink the dating pool using the MASTER list, ignoring the sidebar
