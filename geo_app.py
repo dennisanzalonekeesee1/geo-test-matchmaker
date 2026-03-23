@@ -175,9 +175,9 @@ if app_mode == "1. Pre-Test Planner":
             lag_map = {"Low (<$50, Impulse)": 1, "Medium ($50-$200)": 7, "High ($200+, Heavy research)": 14}
             
             # --- NEW: OPTIMIZATION TOGGLE ---
-            auto_optimize = st.toggle("🤖 Auto-Optimize Cadence & Pairs for Lowest % Lift (MDE)", value=True)
+            auto_optimize = st.toggle("🤖 Auto-Optimize Cadence, Pairs & Correlation for Lowest % Lift", value=True)
             if auto_optimize:
-                st.caption("The engine will simulate all possible combinations to find the exact cadence and number of pairs that mathematically minimizes your target % lift.")
+                st.caption("The engine will simulate all possible combinations to find the exact correlation floor, cadence, and number of pairs that mathematically minimizes your target % lift.")
 
             # --- PHASE A: GATHER ALL CELL SETTINGS FIRST ---
             cell_configs = []
@@ -208,92 +208,108 @@ if app_mode == "1. Pre-Test Planner":
 
             # --- NEW: OPTIMIZATION ENGINE ---
             if auto_optimize:
-                with st.spinner("Simulating combinations to find lowest % Lift..."):
+                with st.spinner("Simulating combinations to find lowest % Lift (MDE)..."):
                     best_avg_mde = float('inf')
                     best_cadence = "Daily"
                     best_pairs = 1
+                    best_corr = min_corr # Defaults to your sidebar setting
                     
-                    # Search grid: Test all cadences and pair counts
-                    for test_cadence in ["Daily", "Weekly", "Monthly"]:
-                        available_df = results_df[results_df['Matched_On'] == test_cadence]
-                        max_pairs_possible = len(available_df) // num_cells
+                    # 1. Search Grid: Test correlations from your sidebar minimum up to 0.98
+                    test_corrs = [round(c, 2) for c in np.arange(min_corr, 0.99, 0.02)]
+                    if min_corr not in test_corrs: test_corrs.insert(0, min_corr)
+                    
+                    for test_corr in test_corrs:
+                        # Dynamically shrink the dating pool to only high-quality matches
+                        corr_filtered_df = results_df[results_df['Correlation'] >= test_corr]
                         
-                        # We test from 1 pair up to a max of 30 per cell to find the sweet spot
-                        for test_pairs in range(1, min(max_pairs_possible + 1, 31)):
-                            
-                            # 1. Simulate Greedy Assignment
-                            sim_assignments = {c['id']: [] for c in cell_configs}
-                            sim_volumes = {c['id']: 0 for c in cell_configs}
-                            pool = available_df.sort_values(by='T_Volume', ascending=False).head(test_pairs * num_cells)
-                            
-                            for _, pair in pool.iterrows():
-                                eligible_cells = [c['id'] for c in cell_configs if len(sim_assignments[c['id']]) < test_pairs]
-                                if not eligible_cells: break
-                                target_cell_id = min(eligible_cells, key=lambda x: sim_volumes[x])
-                                sim_assignments[target_cell_id].append(pair)
-                                sim_volumes[target_cell_id] += pair['T_Volume']
+                        for test_cadence in ["Daily", "Weekly", "Monthly"]:
+                            available_df = corr_filtered_df[corr_filtered_df['Matched_On'] == test_cadence]
+                            if available_df.empty: continue
                                 
-                            # 2. Simulate MDE Calculation
-                            combo_mdes = []
-                            for config in cell_configs:
-                                sim_df = pd.DataFrame(sim_assignments[config['id']])
-                                if sim_df.empty: 
-                                    combo_mdes.append(float('inf'))
-                                    continue
+                            max_pairs_possible = len(available_df) // num_cells
+                            if max_pairs_possible < 1: continue
+                                
+                            # Test from 1 pair up to 30 to find the volume sweet spot
+                            for test_pairs in range(1, min(max_pairs_possible + 1, 31)):
+                                
+                                # Simulate Greedy Assignment
+                                sim_assignments = {c['id']: [] for c in cell_configs}
+                                sim_volumes = {c['id']: 0 for c in cell_configs}
+                                pool = available_df.sort_values(by='T_Volume', ascending=False).head(test_pairs * num_cells)
+                                
+                                for _, pair in pool.iterrows():
+                                    eligible_cells = [c['id'] for c in cell_configs if len(sim_assignments[c['id']]) < test_pairs]
+                                    if not eligible_cells: break
+                                    target_cell_id = min(eligible_cells, key=lambda x: sim_volumes[x])
+                                    sim_assignments[target_cell_id].append(pair)
+                                    sim_volumes[target_cell_id] += pair['T_Volume']
                                     
-                                hl_days = halflife_map[config['channel']]
-                                lag_days = lag_map[config['consideration']]
-                                calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
-                                
-                                t_dmas = sim_df['Treatment_DMA'].tolist()
-                                c_dmas = sim_df['Control_DMA'].tolist()
-                                t_sum = daily_pivot[t_dmas].sum(axis=1)
-                                c_sum = daily_pivot[c_dmas].sum(axis=1)
-                                
-                                if test_cadence == 'Weekly':
-                                    t_sum = t_sum.resample('W-MON').sum()
-                                    c_sum = c_sum.resample('W-MON').sum()
-                                    periods = calc_test_days / 7.0
-                                elif test_cadence == 'Monthly':
-                                    t_sum = t_sum.resample('MS').sum()
-                                    c_sum = c_sum.resample('MS').sum()
-                                    periods = calc_test_days / 30.0
-                                else:
-                                    periods = calc_test_days
+                                # Simulate MDE Calculation
+                                combo_mdes = []
+                                for config in cell_configs:
+                                    sim_df = pd.DataFrame(sim_assignments[config['id']])
+                                    if sim_df.empty: 
+                                        combo_mdes.append(float('inf'))
+                                        continue
+                                        
+                                    hl_days = halflife_map[config['channel']]
+                                    lag_days = lag_map[config['consideration']]
+                                    calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
                                     
-                                volume_scalar = t_sum.sum() / c_sum.sum() if c_sum.sum() > 0 else 1
-                                c_scaled = c_sum * volume_scalar
-                                
-                                sd_diff = np.std(t_sum - c_scaled)
-                                mde_abs = 2.8 * (sd_diff * np.sqrt(periods))
-                                base_vol = t_sum.mean() * periods
-                                mde_pct = (mde_abs / base_vol) * 100 if base_vol > 0 else float('inf')
-                                combo_mdes.append(mde_pct)
-                                
-                            # 3. Evaluate if this combo is the new best
-                            avg_mde = np.mean(combo_mdes)
-                            if avg_mde < best_avg_mde:
-                                best_avg_mde = avg_mde
-                                best_cadence = test_cadence
-                                best_pairs = test_pairs
-                                
+                                    t_dmas = sim_df['Treatment_DMA'].tolist()
+                                    c_dmas = sim_df['Control_DMA'].tolist()
+                                    t_sum = daily_pivot[t_dmas].sum(axis=1)
+                                    c_sum = daily_pivot[c_dmas].sum(axis=1)
+                                    
+                                    if test_cadence == 'Weekly':
+                                        t_sum = t_sum.resample('W-MON').sum()
+                                        c_sum = c_sum.resample('W-MON').sum()
+                                        periods = calc_test_days / 7.0
+                                    elif test_cadence == 'Monthly':
+                                        t_sum = t_sum.resample('MS').sum()
+                                        c_sum = c_sum.resample('MS').sum()
+                                        periods = calc_test_days / 30.0
+                                    else:
+                                        periods = calc_test_days
+                                        
+                                    volume_scalar = t_sum.sum() / c_sum.sum() if c_sum.sum() > 0 else 1
+                                    c_scaled = c_sum * volume_scalar
+                                    
+                                    sd_diff = np.std(t_sum - c_scaled)
+                                    mde_abs = 2.8 * (sd_diff * np.sqrt(periods))
+                                    base_vol = t_sum.mean() * periods
+                                    mde_pct = (mde_abs / base_vol) * 100 if base_vol > 0 else float('inf')
+                                    combo_mdes.append(mde_pct)
+                                    
+                                # Evaluate if this combo is the new overall winner
+                                avg_mde = np.mean(combo_mdes)
+                                if avg_mde < best_avg_mde:
+                                    best_avg_mde = avg_mde
+                                    best_cadence = test_cadence
+                                    best_pairs = test_pairs
+                                    best_corr = test_corr
+                                    
                     # Apply the winning combo to our configs
                     for config in cell_configs:
                         config['cadence'] = best_cadence
                         config['num_pairs'] = best_pairs
+                        config['correlation'] = best_corr
                         
-                    st.success(f"✨ **Optimization Complete!** To minimize variance, the engine selected a **{best_cadence}** match cadence with **{best_pairs}** pairs per cell. (Predicted Average MDE: {best_avg_mde:.1f}%)")
+                    st.success(f"✨ **Optimization Complete!** To minimize variance, the engine selected a **{best_corr} Minimum Correlation**, **{best_cadence}** match cadence, with **{best_pairs}** pairs per cell. (Predicted Average MDE: {best_avg_mde:.1f}%)")
 
             # --- PHASE B: GREEDY VOLUME BALANCING (THE ACTUAL RUN) ---
             assigned_pair_ids = []
             cell_assignments = {i: pd.DataFrame() for i in range(num_cells)}
+            
+            # Use the optimized correlation floor if auto-optimize is on, otherwise use the sidebar default
+            active_results_df = results_df[results_df['Correlation'] >= best_corr] if auto_optimize else results_df
             
             for current_cadence in ["Daily", "Weekly", "Monthly"]:
                 competing_cells = [c for c in cell_configs if c['cadence'] == current_cadence]
                 if not competing_cells: continue
                 
                 total_pairs_needed = sum(c['num_pairs'] for c in competing_cells)
-                available_df = results_df[(results_df['Matched_On'] == current_cadence) & (~results_df['Pair_ID'].isin(assigned_pair_ids))]
+                available_df = active_results_df[(active_results_df['Matched_On'] == current_cadence) & (~active_results_df['Pair_ID'].isin(assigned_pair_ids))]
                 
                 if total_pairs_needed > len(available_df):
                     st.error(f"Not enough {current_cadence} pairs to fill all requests. You need {total_pairs_needed}, but only {len(available_df)} are available.")
