@@ -133,7 +133,7 @@ if app_mode == "1. Pre-Test Planner":
             monthly_pairs, _ = find_pairs(monthly_pivot, min_corr)
             for p in monthly_pairs: p['Matched_On'] = 'Monthly'
 
-       all_pairs = daily_pairs + weekly_pairs + monthly_pairs
+        all_pairs = daily_pairs + weekly_pairs + monthly_pairs
         results_df = pd.DataFrame(all_pairs)
         if not results_df.empty:
             # NEW: Calculate volume for balancing logic later
