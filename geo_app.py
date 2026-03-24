@@ -181,7 +181,7 @@ if app_mode == "1. Pre-Test Planner":
                 c1, c2, c3, c4 = st.columns(4)
                 cell_name = c1.text_input(f"Campaign/Cell Name", f"Campaign {i+1}", key=f"name_{i}")
                 cadence = c2.selectbox(f"Match Cadence", ["Daily", "Weekly", "Monthly"], key=f"cadence_{i}")
-                num_pairs = c3.number_input(f"Pairs to Auto-Select", 1, 50, value=best_p, key=f"num_{i}")
+                num_pairs = c3.number_input(f"Pairs to Auto-Select", 1, 50, 5, key=f"num_{i}")
                 target_roas = c4.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
                 
                 ac1, ac2 = st.columns(2)
