@@ -176,12 +176,54 @@ if app_mode == "1. Pre-Test Planner":
             
             # --- PHASE A: GATHER ALL CELL SETTINGS FIRST ---
             cell_configs = []
+            
+            # 1. Create a running inventory dictionary based on the pairs generated in Step 1
+            inventory = {
+                "Daily": len(results_df[results_df['Matched_On'] == 'Daily']),
+                "Weekly": len(results_df[results_df['Matched_On'] == 'Weekly']),
+                "Monthly": len(results_df[results_df['Matched_On'] == 'Monthly'])
+            }
+
             for i in range(num_cells):
                 st.markdown(f"### ⚙️ Settings for Test Cell {i+1}")
                 c1, c2, c3, c4 = st.columns(4)
                 cell_name = c1.text_input(f"Campaign/Cell Name", f"Campaign {i+1}", key=f"name_{i}")
                 cadence = c2.selectbox(f"Match Cadence", ["Daily", "Weekly", "Monthly"], key=f"cadence_{i}")
-                num_pairs = c3.number_input(f"Pairs to Auto-Select", 1, 50, 5, key=f"num_{i}")
+                
+                # 2. Check the remaining inventory for the chosen cadence
+                max_available = inventory[cadence]
+                num_key = f"num_{i}"
+                
+                # 3. Streamlit Safety Catch: If a user changes an earlier cell, the inventory shrinks.
+                # We must manually reduce the session_state so it doesn't crash by exceeding the new max_value.
+                if num_key in st.session_state:
+                    if st.session_state[num_key] > max_available and max_available > 0:
+                        st.session_state[num_key] = max_available
+                    elif max_available == 0:
+                        st.session_state[num_key] = 0
+
+                # 4. Create the dynamic number_input based on remaining inventory
+                if max_available > 0:
+                    # Set a smart default (up to 5, or whatever is left)
+                    default_val = min(5, max_available)
+                    if num_key not in st.session_state:
+                        st.session_state[num_key] = default_val
+                        
+                    num_pairs = c3.number_input(f"Pairs (Max: {max_available})", 
+                                                min_value=1, 
+                                                max_value=max_available, 
+                                                key=num_key)
+                else:
+                    # If inventory is empty, lock the input down to 0
+                    num_pairs = c3.number_input(f"No {cadence} left", 
+                                                min_value=0, 
+                                                max_value=0, 
+                                                key=num_key, 
+                                                disabled=True)
+                
+                # 5. Deduct what this cell just claimed from the global inventory
+                inventory[cadence] -= num_pairs
+
                 target_roas = c4.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
                 
                 ac1, ac2 = st.columns(2)
