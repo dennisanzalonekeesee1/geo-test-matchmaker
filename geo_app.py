@@ -152,7 +152,84 @@ if app_mode == "1. Pre-Test Planner":
             results_df, daily_pivot, trim_msg, trim_success = process_pre_test(
                 df_sales_raw, df_map_raw, date_col, zip_col, sales_col, dma_col, dict_zip_col, min_corr
             )
-            
+        @st.cache_data
+    def get_optimizer_suggestion(num_cells, results_df, daily_pivot):
+        """Simulates all cadence/pair combinations to find the lowest expected % MDE."""
+        best_score = float('inf')
+        best_cadence = "Daily"
+        best_pairs = 1
+
+        for cadence in ["Daily", "Weekly", "Monthly"]:
+            available_df = results_df[results_df['Matched_On'] == cadence]
+            max_pairs = len(available_df) // num_cells
+            if max_pairs < 1: continue
+
+            # Evaluate up to 15 pairs (prevents dipping too far into low-correlation pairs)
+            for p in range(1, min(max_pairs + 1, 16)):
+                # 1. Simulate the Greedy Volume Balancing for this (cadence, pair) combo
+                pool = available_df.sort_values(by='T_Volume', ascending=False).head(p * num_cells)
+                cell_volumes = {i: 0 for i in range(num_cells)}
+                assigned_rows = {i: [] for i in range(num_cells)}
+
+                for _, pair in pool.iterrows():
+                    eligible_cells = [i for i in range(num_cells) if len(assigned_rows[i]) < p]
+                    if not eligible_cells: break
+                    target_cell = min(eligible_cells, key=lambda x: cell_volumes[x])
+                    assigned_rows[target_cell].append(pair)
+                    cell_volumes[target_cell] += pair['T_Volume']
+
+                # 2. Calculate the MDE% Proxy for this setup
+                cell_scores = []
+                for i in range(num_cells):
+                    cell_df = pd.DataFrame(assigned_rows[i])
+                    if cell_df.empty:
+                        cell_scores.append(float('inf'))
+                        continue
+
+                    t_dmas = cell_df['Treatment_DMA'].tolist()
+                    c_dmas = cell_df['Control_DMA'].tolist()
+
+                    t_sum = daily_pivot[t_dmas].sum(axis=1)
+                    c_sum = daily_pivot[c_dmas].sum(axis=1)
+
+                    # Standardize proxy to a 28-day window to compare across cadences safely
+                    if cadence == 'Weekly':
+                        t_sum = t_sum.resample('W-MON').sum()
+                        c_sum = c_sum.resample('W-MON').sum()
+                        periods_proxy = 4.0
+                    elif cadence == 'Monthly':
+                        t_sum = t_sum.resample('MS').sum()
+                        c_sum = c_sum.resample('MS').sum()
+                        periods_proxy = 1.0
+                    else:
+                        periods_proxy = 28.0
+
+                    if c_sum.sum() == 0 or t_sum.mean() == 0:
+                        cell_scores.append(float('inf'))
+                        continue
+
+                    volume_scalar = t_sum.sum() / c_sum.sum()
+                    c_scaled = c_sum * volume_scalar
+                    diffs = t_sum - c_scaled
+                    
+                    # Core MDE Math Simulation
+                    sd_diff = np.std(diffs)
+                    se_total = sd_diff * np.sqrt(periods_proxy)
+                    mde_absolute = 2.8 * se_total
+                    baseline_vol = t_sum.mean() * periods_proxy
+                    
+                    mde_pct = (mde_absolute / baseline_vol) * 100
+                    cell_scores.append(mde_pct)
+
+                # We optimize for the average MDE% across all cells in the setup
+                avg_score = np.mean(cell_scores)
+                if avg_score < best_score:
+                    best_score = avg_score
+                    best_cadence = cadence
+                    best_pairs = p
+
+        return best_cadence, best_pairs
+        
         st.header("Step 1: The Matchmaker Waterfall")
         if not results_df.empty:
             col1, col2, col3, col4 = st.columns(4)
