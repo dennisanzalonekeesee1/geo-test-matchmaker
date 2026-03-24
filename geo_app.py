@@ -40,7 +40,6 @@ st.markdown("Market Matching, Multi-Cell Planning, Post-Test Causal Measurement.
 # --- SIDEBAR: NAVIGATION & UPLOADS ---
 with st.sidebar:
     app_mode = st.radio("🔄 Select App Mode", ["1. Pre-Test Planner", "2. Post-Test Measurement"])
-    test_direction = st.radio("Test Direction", ["Scale-Up (Ads ON)", "Holdout (Ads OFF)"])
     st.divider()
 
 # --- CACHED DATA PROCESSING (Shared by both modes) ---
@@ -136,10 +135,6 @@ if app_mode == "1. Pre-Test Planner":
         all_pairs = daily_pairs + weekly_pairs + monthly_pairs
         results_df = pd.DataFrame(all_pairs)
         if not results_df.empty:
-            # NEW: Calculate volume for balancing logic later
-            t_vols = daily_pivot.sum()
-            results_df['T_Volume'] = results_df['Treatment_DMA'].map(t_vols)
-
             results_df.index = results_df.index + 1
             results_df.index.name = 'Pair_ID'
             results_df = results_df.reset_index()
@@ -167,6 +162,7 @@ if app_mode == "1. Pre-Test Planner":
             st.header("Step 2: Multi-Cell Test Builder")
             num_cells = st.number_input("How many separate test cells are you running?", min_value=1, max_value=5, value=1)
             
+            assigned_pair_ids = [] 
             halflife_map = {
                 "High-Intent DR (Search, Shopping)": 3, 
                 "Feed-Based Social (Meta, TikTok)": 7, 
@@ -174,116 +170,31 @@ if app_mode == "1. Pre-Test Planner":
             }
             lag_map = {"Low (<$50, Impulse)": 1, "Medium ($50-$200)": 7, "High ($200+, Heavy research)": 14}
             
-            # --- PHASE A: GATHER ALL CELL SETTINGS FIRST ---
-            cell_configs = []
-            
-            # 1. Create a running inventory dictionary based on the pairs generated in Step 1
-            inventory = {
-                "Daily": len(results_df[results_df['Matched_On'] == 'Daily']),
-                "Weekly": len(results_df[results_df['Matched_On'] == 'Weekly']),
-                "Monthly": len(results_df[results_df['Matched_On'] == 'Monthly'])
-            }
-
             for i in range(num_cells):
-                st.markdown(f"### ⚙️ Settings for Test Cell {i+1}")
+                st.markdown(f"### 🧪 Test Cell {i+1}")
                 c1, c2, c3, c4 = st.columns(4)
                 cell_name = c1.text_input(f"Campaign/Cell Name", f"Campaign {i+1}", key=f"name_{i}")
                 cadence = c2.selectbox(f"Match Cadence", ["Daily", "Weekly", "Monthly"], key=f"cadence_{i}")
                 
-                # 2. Check the remaining inventory for the chosen cadence
-                max_available = inventory[cadence]
-                num_key = f"num_{i}"
+                available_df = results_df[(results_df['Matched_On'] == cadence) & (~results_df['Pair_ID'].isin(assigned_pair_ids))]
+                max_available = len(available_df)
                 
-                # 3. Streamlit Safety Catch: If a user changes an earlier cell, the inventory shrinks.
-                # We must manually reduce the session_state so it doesn't crash by exceeding the new max_value.
-                if num_key in st.session_state:
-                    if st.session_state[num_key] > max_available and max_available > 0:
-                        st.session_state[num_key] = max_available
-                    elif max_available == 0:
-                        st.session_state[num_key] = 0
-
-                # 4. Create the dynamic number_input based on remaining inventory
-                if max_available > 0:
-                    # Set a smart default (up to 5, or whatever is left)
-                    default_val = min(5, max_available)
-                    if num_key not in st.session_state:
-                        st.session_state[num_key] = default_val
-                        
-                    num_pairs = c3.number_input(f"Pairs (Max: {max_available})", 
-                                                min_value=1, 
-                                                max_value=max_available, 
-                                                key=num_key)
-                else:
-                    # If inventory is empty, lock the input down to 0
-                    num_pairs = c3.number_input(f"No {cadence} left", 
-                                                min_value=0, 
-                                                max_value=0, 
-                                                key=num_key, 
-                                                disabled=True)
-                
-                # 5. Deduct what this cell just claimed from the global inventory
-                inventory[cadence] -= num_pairs
-
+                if max_available == 0:
+                    st.error(f"0 {cadence} pairs left! None available for this cell.")
+                    continue
+                    
+                num_pairs = c3.number_input(f"Pairs to Auto-Select (Max {max_available})", 1, max_available, min(5, max_available), key=f"num_{i}")
                 target_roas = c4.number_input("Target Break-Even ROAS", 0.1, 20.0, 2.0, step=0.1, key=f"roas_{i}")
+                
+                cell_df = available_df.head(num_pairs)
+                assigned_pair_ids.extend(cell_df['Pair_ID'].tolist())
                 
                 ac1, ac2 = st.columns(2)
                 channel = ac1.selectbox("Media Format & Attention Level", list(halflife_map.keys()), key=f"chan_{i}")
                 consideration = ac2.selectbox("Product Price / Consideration", list(lag_map.keys()), key=f"cons_{i}")
                 
-                cell_configs.append({
-                    'id': i, 'name': cell_name, 'cadence': cadence, 'num_pairs': num_pairs,
-                    'roas': target_roas, 'channel': channel, 'consideration': consideration
-                })
-            
-            # --- PHASE B: GREEDY VOLUME BALANCING (THE MAGIC) ---
-            assigned_pair_ids = []
-            cell_assignments = {i: pd.DataFrame() for i in range(num_cells)}
-            
-            for current_cadence in ["Daily", "Weekly", "Monthly"]:
-                competing_cells = [c for c in cell_configs if c['cadence'] == current_cadence]
-                if not competing_cells: continue
-                
-                total_pairs_needed = sum(c['num_pairs'] for c in competing_cells)
-                available_df = results_df[(results_df['Matched_On'] == current_cadence) & (~results_df['Pair_ID'].isin(assigned_pair_ids))]
-                
-                if total_pairs_needed > len(available_df):
-                    st.error(f"Not enough {current_cadence} pairs to fill all requests. You need {total_pairs_needed}, but only {len(available_df)} are available.")
-                    st.stop()
-                    
-                # Sort pool by Volume descending so we deal out the largest markets first
-                pool = available_df.sort_values(by='T_Volume', ascending=False).head(total_pairs_needed)
-                
-                # Track current volume per cell to keep them balanced
-                cell_volumes = {c['id']: 0 for c in competing_cells}
-                assigned_rows = {c['id']: [] for c in competing_cells}
-                
-                for _, pair in pool.iterrows():
-                    # Check which cells still need pairs
-                    eligible_cells = [c['id'] for c in competing_cells if len(assigned_rows[c['id']]) < c['num_pairs']]
-                    if not eligible_cells: break
-                    
-                    # Give the pair to the eligible cell with the LOWEST current total volume
-                    target_cell_id = min(eligible_cells, key=lambda x: cell_volumes[x])
-                    
-                    assigned_rows[target_cell_id].append(pair)
-                    cell_volumes[target_cell_id] += pair['T_Volume']
-                    assigned_pair_ids.append(pair['Pair_ID'])
-                    
-                # Convert list of rows back to DataFrames
-                for c in competing_cells:
-                    cell_assignments[c['id']] = pd.DataFrame(assigned_rows[c['id']])
-
-            st.divider()
-
-            # --- PHASE C: CALCULATE ECONOMICS & DISPLAY ---
-            for config in cell_configs:
-                i = config['id']
-                cell_df = cell_assignments[i]
-                cell_name = config['name']
-                cadence = config['cadence']
-                
-                hl_days = halflife_map[config['channel']]
-                lag_days = lag_map[config['consideration']]
+                hl_days = halflife_map[channel]
+                lag_days = lag_map[consideration]
                 
                 calc_cooldown = lag_days + (hl_days * 2)
                 calc_test_days = max(28, int(np.ceil((lag_days * 2) / 7.0) * 7))
@@ -316,23 +227,21 @@ if app_mode == "1. Pre-Test Planner":
                 
                 baseline_t_vol = t_sum.mean() * periods
                 mde_pct = (mde_absolute / baseline_t_vol) * 100 if baseline_t_vol > 0 else 0
-                recommended_budget = mde_absolute / config['roas'] if config['roas'] > 0 else 0
+                recommended_budget = mde_absolute / target_roas if target_roas > 0 else 0
                 
-                st.markdown(f"### 🧪 Results: {cell_name}")
                 with st.expander(f"📊 View Economics & Export for: {cell_name}", expanded=True):
                     bc1, bc2, bc3, bc4 = st.columns(4)
                     bc1.metric("Active Run Time", f"{calc_test_days} Days")
                     bc2.metric("Adstock Cooldown", f"{calc_cooldown} Days")
                     bc3.metric("Incremental Sales Needed", f"${mde_absolute:,.0f} ({mde_pct:.1f}% Lift)")
-                    budget_label = "Required Total Budget" if test_direction == "Scale-Up (Ads ON)" else "Spend to Withhold"
-                    bc4.metric(budget_label, f"${recommended_budget:,.0f}")
+                    bc4.metric("Required Total Budget", f"${recommended_budget:,.0f}")
                     
                     chart_data = pd.DataFrame({'Treatment': t_sum, 'Control (Scaled)': c_scaled}).reset_index()
                     fig = px.line(chart_data, x=date_col, y=['Treatment', 'Control (Scaled)'], title=f"Historical Baseline: {cell_name}", labels={'value':'Gross Sales', 'variable':'Group'})
                     st.plotly_chart(fig, use_container_width=True)
                     
                     csv = cell_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(f"📥 Download Activation Map: {cell_name}", data=csv, file_name=f'test_cell_{i+1}.csv', mime='text/csv', key=f"dl_{i}")
+                    st.download_button(f"📥 Download Activation Map: {cell_name}", data=csv, file_name=f'test_cell_{i+1}.csv', mime='text/csv')
                 st.divider()
         else:
             st.error(f"No pairs found. Try lowering the threshold.")
@@ -353,8 +262,7 @@ elif app_mode == "2. Post-Test Measurement":
         st.header("2. Campaign Details")
         start_date = st.date_input("Test Start Date (Ads turned ON)")
         end_date = st.date_input("Measurement End Date (End of Cooldown)")
-        spend_label = "Actual Media Spend ($)" if test_direction == "Scale-Up (Ads ON)" else "Withheld Media Spend ($)"
-        actual_spend = st.number_input(spend_label, min_value=1.0, value=10000.0, step=500.0)
+        actual_spend = st.number_input("Actual Media Spend ($)", min_value=1.0, value=10000.0, step=500.0)
         
         st.markdown("### Verify Column Names")
         date_col2 = st.text_input("Date Column (Sales)", "Day", key="d2")
@@ -441,36 +349,20 @@ elif app_mode == "2. Post-Test Measurement":
                 
                 ci_lower = incremental_revenue - (1.96 * se_total)
                 ci_upper = incremental_revenue + (1.96 * se_total)
+                stat_sig = ci_lower > 0
                 
-                # --- DYNAMIC HOLDOUT LOGIC ---
-                if test_direction == "Scale-Up (Ads ON)":
-                    stat_sig = ci_lower > 0
-                    is_success = incremental_revenue > 0
-                    display_revenue = incremental_revenue
-                    display_roas = roas
-                    success_msg = "✅ **STATISTICALLY SIGNIFICANT WIN:** The ads drove proven incremental revenue! (Confidence Interval is entirely above $0)."
-                    warn_msg = "⚠️ **NOT SIGNIFICANT / INCONCLUSIVE:** The lift was positive but indistinguishable from natural market variance (noise). The confidence interval includes zero."
-                    fail_msg = "🚨 **NEGATIVE OR ZERO LIFT:** The Treatment markets underperformed compared to the mathematical baseline. The ads did not work."
-                else: # Holdout (Ads OFF)
-                    stat_sig = ci_upper < 0
-                    is_success = incremental_revenue < 0 # A drop in sales is a success!
-                    display_revenue = abs(incremental_revenue) # Show absolute dollars protected
-                    display_roas = abs(incremental_revenue) / actual_spend if actual_spend > 0 else 0
-                    success_msg = "✅ **STATISTICALLY SIGNIFICANT HOLDOUT:** Turning ads OFF caused a proven drop in sales! Your baseline spend is highly incremental. (CI is entirely below $0)."
-                    warn_msg = "⚠️ **INCONCLUSIVE:** The sales dropped, but it was indistinguishable from natural market variance. The confidence interval includes zero."
-                    fail_msg = "🚨 **NO DROP DETECTED:** Turning ads OFF did not cause a meaningful drop in sales. Your baseline spend is likely taking credit for organic sales."
-
+                # --- UI RESULTS ---
                 st.header("Step 1: Test Results & Significance")
                 if stat_sig:
-                    st.success(success_msg)
-                elif is_success:
-                    st.warning(warn_msg)
+                    st.success("✅ **STATISTICALLY SIGNIFICANT:** The campaign successfully pierced the market noise and drove proven incremental revenue! (The 95% Confidence Interval is entirely above $0).")
+                elif incremental_revenue > 0:
+                    st.warning("⚠️ **NOT SIGNIFICANT / INCONCLUSIVE:** The incremental lift was positive but indistinguishable from natural market variance (noise). The confidence interval includes zero.")
                 else:
-                    st.error(fail_msg)
+                    st.error("🚨 **NEGATIVE OR ZERO LIFT:** The Treatment markets underperformed compared to the mathematical baseline. The ads did not work.")
 
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Total Incremental Impact", f"${display_revenue:,.0f}")
-                m2.metric("True ROAS", f"{display_roas:.2f}x")
+                m1.metric("Total Incremental Revenue", f"${incremental_revenue:,.0f}")
+                m2.metric("Realized ROAS", f"{roas:.2f}x")
                 m3.metric("95% Confidence Interval", f"${ci_lower:,.0f} to ${ci_upper:,.0f}")
                 m4.metric("% Lift over Baseline", f"{(incremental_revenue / total_counterfactual)*100:.1f}%" if total_counterfactual > 0 else "N/A")
                 
